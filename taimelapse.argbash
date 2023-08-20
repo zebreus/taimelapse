@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+
+# m4_ignore(
+echo "This is just a script template, not the script (yet) - pass it to 'argbash' to fix this." >&2
+exit 11 #)Created by argbash-init v2.10.0
+# ARG_OPTIONAL_SINGLE(imagemagick-options, m, Options for imagemagick)
+### ARG_OPTIONAL_SINGLE(aspect-ratio, [], Target aspect ratio (default is the natural aspect ratio))
+# ARG_OPTIONAL_SINGLE(cut-left, [], Cut pixels from the left side of the image, 0)
+# ARG_OPTIONAL_SINGLE(cut-right, [], Cut pixels from the right side of the image, 0)
+# ARG_OPTIONAL_SINGLE(cut-top, [], Cut pixels from the top side of the image, 0)
+# ARG_OPTIONAL_SINGLE(cut-bottom, [], Cut pixels from the bottom side of the image, 0)
+# ARG_OPTIONAL_SINGLE(cut-all, [], Cut pixels from all sides of the image. This value is added to the side specific values., 0)
+# ARG_OPTIONAL_SINGLE(rotate, [], Rotate the images by degrees. You also need to specify enough cut to remove the borders, 0)
+
+# ARG_OPTIONAL_SINGLE(output, o, Output file, timelapse.mp4)
+# ARG_OPTIONAL_SINGLE(final-resolution, [], The resolution of the final video. Aspect ratio needs to be correct, 3840x2160)
+# ARG_OPTIONAL_BOOLEAN(upscale, u, Upscale the images with realesrgan-ncnn-vulkan)
+# ARG_OPTIONAL_SINGLE(framerate, [], Framerate of the final image in frames per second, 10)
+# ARG_OPTIONAL_SINGLE(realesrgan-flags, r, Flags that are passed to realesrgan-ncnn-vulkan)
+# ARG_OPTIONAL_SINGLE(ffmpeg-flags, f, Flags that are passed to ffmpeg. Used to define the encoding pipeline., [-c:v libx264 -crf 18 -preset veryslow -pix_fmt yuv420p])
+# ARG_POSITIONAL_INF(frames, All frames in the correct order as images, 1)
+# ARG_VERBOSE([v])
+# ARG_USE_PROGRAM(ffmpeg, FFMPEG)
+# ARG_USE_PROGRAM(convert, IMAGEMAGICK_CONVERT)
+# ARG_USE_PROGRAM(realesrgan-ncnn-vulkan, REALESRGAN_NCNN_VULKAN)
+# ARG_USE_PROGRAM(mktemp, MKTEMP)
+# ARG_HELP([<The general help message of my script>])
+# ARGBASH_GO
+
+# [ <-- needed because of Argbash
+
+# vvv  PLACE YOUR CODE HERE  vvv
+
+number_of_frames=${#_arg_frames[@]}
+
+function progress_string {
+    local progress=$1
+    local total=$2
+    local width=20
+    local progress_chars=$(echo "scale=2; $progress / $total * $width" | bc)
+    local progress_chars=${progress_chars%.*}
+    local progress_string=$(printf "%${progress_chars}s" | tr ' ' '#')
+    local remaining_chars=$((width - progress_chars))
+    local remaining_string=$(printf "%${remaining_chars}s" | tr ' ' ' ')
+    echo "[$progress_string$remaining_string] $progress / $total"
+}
+
+# Verify frames
+echo "Verifying frames"
+dimensions=""
+for index in "${!_arg_frames[@]}"; do
+    file="${_arg_frames[$index]}"
+
+    echo "Verifying frames $(progress_string $((index + 1)) $number_of_frames)"
+
+    if [ ! -f "$file" ]; then
+        echo "Frame $file does not exist"
+        exit 1
+    fi
+
+    file_dimensions=$(identify -format "%wx%h" "$file")
+
+    if [ $? -ne 0 ]; then
+        echo "Frame $file is not a valid image"
+        exit 1
+    fi
+
+    if [ -z "$dimensions" ]; then
+        dimensions="$file_dimensions"
+    fi
+
+    if [ "$dimensions" != "$file_dimensions" ]; then
+        echo "Frame $file has different dimensions than the other frames."
+        echo "Expected $dimensions, got $file_dimensions"
+        exit 1
+    fi
+
+done
+
+WORKING_DIR=$(mktemp -d)
+
+if test $_arg_verbose -ge 1; then
+    echo "Working dir is $WORKING_DIR"
+fi
+
+natural_aspect_ratio=$(echo $dimensions | sed 's/x/:/g')
+final_aspect_ratio=$(echo $dimensions | sed 's/x/:/g')
+natural_width=$(echo $dimensions | cut -d'x' -f1)
+natural_height=$(echo $dimensions | cut -d'x' -f2)
+aspect_ratio=${_final_aspect_ratio:-$natural_aspect_ratio}
+
+cut_left=$((_arg_cut_left + _arg_cut_all))
+cut_right=$((_arg_cut_right + _arg_cut_all))
+cut_top=$((_arg_cut_top + _arg_cut_all))
+cut_bottom=$((_arg_cut_bottom + _arg_cut_all))
+
+cropped_width=$((natural_width - cut_left - cut_right))
+cropped_height=$((natural_height - cut_top - cut_bottom))
+cropped_offset_x=$cut_left
+cropped_offset_y=$cut_top
+
+crop_string="${cropped_width}x${cropped_height}+${cropped_offset_x}+${cropped_offset_y}"
+
+# Imagemagick convert frames to png
+mkdir -p "$WORKING_DIR/processed"
+declare -a processed_frames=()
+
+function fail {
+    echo $@
+    exit 1
+}
+
+echo "Preprocessing frames with imagemagick"
+for index in "${!_arg_frames[@]}"; do
+    file="${_arg_frames[$index]}"
+    echo "Preprocessing frames with imagemagick $(progress_string $((index + 1)) $number_of_frames)"
+    file_basename=$(basename $file)
+    converted_filename="$WORKING_DIR/processed/${file_basename%.*}.png"
+    $IMAGEMAGICK_CONVERT $file -distort SRT $_arg_rotate $converted_filename.alpha.png || fail "Failed to convert $file"
+    $IMAGEMAGICK_CONVERT $converted_filename.alpha.png -crop $crop_string +repage $converted_filename.beta.png || fail "Failed to convert $file"
+    $IMAGEMAGICK_CONVERT $converted_filename.beta.png -gravity center -crop $aspect_ratio +repage $converted_filename.gamma.png || fail "Failed to convert $file"
+    sh -c "$IMAGEMAGICK_CONVERT $converted_filename.gamma.png $_arg_imagemagick_options +repage $converted_filename"
+    # rm $converted_filename.alpha.png $converted_filename.beta.png $converted_filename.gamma.png
+
+    if [ $? -ne 0 ]; then
+        echo "Failed to convert $file"
+        exit 1
+    fi
+    processed_frames+=("$converted_filename")
+done
+
+# Upscale frames using realesrgan-ncnn-vulkan
+mkdir -p "$WORKING_DIR/upscaled"
+declare -a upscaled_frames=()
+
+function parse_output {
+    elapsed=$1
+    last=""
+    while read -r line; do
+        grepped_line=$(echo $line | grep -Po '^[0-9]?[0-9]\.[0-9][0-9]%$' | grep -Po '^[0-9]?[0-9]')
+        if [ -z "$grepped_line" ]; then
+            continue
+        fi
+        if [ "$grepped_line" == "$last" ]; then
+            continue
+        fi
+        last=$grepped_line
+
+        value=$((elapsed * 100 + grepped_line))
+        total=$((number_of_frames * 100))
+
+        echo "Upscaling frames $(progress_string $value $total)%"
+    done
+}
+
+echo "Preparing to upscale first frame"
+for index in "${!processed_frames[@]}"; do
+    file="${processed_frames[$index]}"
+    file_basename=$(basename $file)
+    upscaled_filename="$WORKING_DIR/upscaled/${file_basename%.*}.png"
+
+    if [ $_arg_upscale = "on" ]; then
+        sh -c "$REALESRGAN_NCNN_VULKAN -i $file -o $upscaled_filename $_arg_realesrgan_flags" |& parse_output $index
+
+        if [ $? -ne 0 ]; then
+            echo "Failed to upscale $file"
+            exit 1
+        fi
+
+        value=$((index * 100 + 100))
+        total=$((number_of_frames * 100))
+        echo "Upscaling frames $(progress_string $value $total)%"
+    else
+        echo "AI upscaling is disabled. Use --upscale to enable"
+
+        # $IMAGEMAGICK_CONVERT $file -resize 400% $upscaled_filename
+        cp $file $upscaled_filename
+        echo "NOT upscaling frames $(progress_string $((index + 1)) $number_of_frames)"
+    fi
+    upscaled_frames+=("$upscaled_filename")
+done
+
+declare -a final_frames=()
+
+if [ -n "$_arg_final_resolution" ]; then
+    mkdir -p "$WORKING_DIR/final"
+    echo "Scaling frames to final height"
+    for index in "${!upscaled_frames[@]}"; do
+        file="${upscaled_frames[$index]}"
+        file_basename=$(basename $file)
+        final_filename="$WORKING_DIR/final/${file_basename%.*}.png"
+        echo "Scaling frames to final height $(progress_string $((index + 1)) $number_of_frames)"
+
+        $IMAGEMAGICK_CONVERT $file -geometry ${_arg_final_resolution}\! $final_filename || fail "Failed to scale $file"
+
+        final_frames+=("$final_filename")
+    done
+else
+    final_frames=("${upscaled_frames[@]}")
+fi
+
+# Create timelapse with ffmpeg
+echo "Creating file with all frames. All frames: ${#final_frames[@]}"
+FRAMES_FILE="$WORKING_DIR/frames.txt"
+rm -rf "$FRAMES_FILE"
+for index in "${!final_frames[@]}"; do
+    file="${final_frames[$index]}"
+    echo "file '$file'" >>"$FRAMES_FILE"
+done
+
+set -x
+sh -c "ffmpeg -f concat -safe 0 -i $FRAMES_FILE -y -hide_banner -loglevel error -stats -r $_arg_framerate -vf \"settb=AVTB,setpts=N/$_arg_framerate/TB,fps=$_arg_framerate\" $_arg_ffmpeg_flags $_arg_output"
+
+# realesrgan-ncnn-vulkan -i GOPR0066.JPG -o scaled/GOPR0066-net.JPG -n realesrnet-x4plus
+
+# ^^^  TERMINATE YOUR CODE BEFORE THE BOTTOM ARGBASH MARKER  ^^^
+
+# ] <-- needed because of Argbash
