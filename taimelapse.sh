@@ -9,6 +9,7 @@
 # ARG_OPTIONAL_SINGLE([cut-bottom],[],[Cut pixels from the bottom side of the image],[0])
 # ARG_OPTIONAL_SINGLE([cut-all],[],[Cut pixels from all sides of the image. This value is added to the side specific values.],[0])
 # ARG_OPTIONAL_SINGLE([rotate],[],[Rotate the images by degrees. You also need to specify enough cut to remove the borders],[0])
+# ARG_OPTIONAL_SINGLE([parallelism],[p],[How many instances of imagemagick can run simultaneously. Detects the number of CPU cores by default.],[auto])
 
 # ARG_OPTIONAL_SINGLE([output],[o],[Output file],[timelapse.mp4])
 # ARG_OPTIONAL_SINGLE([final-resolution],[],[The resolution of the final video. Aspect ratio needs to be correct],[3840x2160])
@@ -42,7 +43,7 @@ die()
 
 begins_with_short_option()
 {
-	local first_option all_short_options='mourfvh'
+	local first_option all_short_options='mpourfvh'
 	first_option="${1:0:1}"
 	test "$all_short_options" = "${all_short_options/$first_option/}" && return 1 || return 0
 }
@@ -59,6 +60,7 @@ _arg_cut_top="0"
 _arg_cut_bottom="0"
 _arg_cut_all="0"
 _arg_rotate="0"
+_arg_parallelism="auto"
 _arg_output="timelapse.mp4"
 _arg_final_resolution="3840x2160"
 _arg_upscale="off"
@@ -71,7 +73,7 @@ _arg_verbose=0
 print_help()
 {
 	printf '%s\n' "<The general help message of my script>"
-	printf 'Usage: %s [-m|--imagemagick-options <arg>] [--aspect-ratio <arg>] [--cut-left <arg>] [--cut-right <arg>] [--cut-top <arg>] [--cut-bottom <arg>] [--cut-all <arg>] [--rotate <arg>] [-o|--output <arg>] [--final-resolution <arg>] [-u|--(no-)upscale] [--framerate <arg>] [-r|--realesrgan-flags <arg>] [-f|--ffmpeg-flags <arg>] [-v|--verbose] [-h|--help] <frames-1> [<frames-2>] ... [<frames-n>] ...\n' "$0"
+	printf 'Usage: %s [-m|--imagemagick-options <arg>] [--aspect-ratio <arg>] [--cut-left <arg>] [--cut-right <arg>] [--cut-top <arg>] [--cut-bottom <arg>] [--cut-all <arg>] [--rotate <arg>] [-p|--parallelism <arg>] [-o|--output <arg>] [--final-resolution <arg>] [-u|--(no-)upscale] [--framerate <arg>] [-r|--realesrgan-flags <arg>] [-f|--ffmpeg-flags <arg>] [-v|--verbose] [-h|--help] <frames-1> [<frames-2>] ... [<frames-n>] ...\n' "$0"
 	printf '\t%s\n' "<frames>: All frames in the correct order as images"
 	printf '\t%s\n' "-m, --imagemagick-options: Options for imagemagick (no default)"
 	printf '\t%s\n' "--aspect-ratio: Target aspect ratio (default is the natural aspect ratio) (no default)"
@@ -81,6 +83,7 @@ print_help()
 	printf '\t%s\n' "--cut-bottom: Cut pixels from the bottom side of the image (default: '0')"
 	printf '\t%s\n' "--cut-all: Cut pixels from all sides of the image. This value is added to the side specific values. (default: '0')"
 	printf '\t%s\n' "--rotate: Rotate the images by degrees. You also need to specify enough cut to remove the borders (default: '0')"
+	printf '\t%s\n' "-p, --parallelism: How many instances of imagemagick can run simultaneously. Detects the number of CPU cores by default. (default: 'auto')"
 	printf '\t%s\n' "-o, --output: Output file (default: 'timelapse.mp4')"
 	printf '\t%s\n' "--final-resolution: The resolution of the final video. Aspect ratio needs to be correct (default: '3840x2160')"
 	printf '\t%s\n' "-u, --upscale, --no-upscale: Upscale the images with realesrgan-ncnn-vulkan (off by default)"
@@ -170,6 +173,17 @@ parse_commandline()
 				;;
 			--rotate=*)
 				_arg_rotate="${_key##--rotate=}"
+				;;
+			-p|--parallelism)
+				test $# -lt 2 && die "Missing value for the optional argument '$_key'." 1
+				_arg_parallelism="$2"
+				shift
+				;;
+			--parallelism=*)
+				_arg_parallelism="${_key##--parallelism=}"
+				;;
+			-p*)
+				_arg_parallelism="${_key##-p}"
 				;;
 			-o|--output)
 				test $# -lt 2 && die "Missing value for the optional argument '$_key'." 1
@@ -314,6 +328,14 @@ check_prog "MKTEMP" 'mktemp'
 
 # vvv  PLACE YOUR CODE HERE  vvv
 
+N=4
+
+if test "$_arg_parallelism" = "auto"; then
+    N=$(nproc)
+else
+    N=$_arg_parallelism
+fi
+
 number_of_frames=${#_arg_frames[@]}
 
 function progress_string {
@@ -328,13 +350,13 @@ function progress_string {
     echo "[$progress_string$remaining_string] $progress / $total"
 }
 
-# Verify frames
-echo "Verifying frames"
 dimensions=""
-for index in "${!_arg_frames[@]}"; do
-    file="${_arg_frames[$index]}"
+failed=false
+error=""
 
-    echo "Verifying frames $(progress_string $((index + 1)) $number_of_frames)"
+function verifyFrame {
+    index=$1
+    file="${_arg_frames[$index]}"
 
     if [ ! -f "$file" ]; then
         echo "Frame $file does not exist"
@@ -353,11 +375,33 @@ for index in "${!_arg_frames[@]}"; do
     fi
 
     if [ "$dimensions" != "$file_dimensions" ]; then
-        echo "Frame $file has different dimensions than the other frames."
-        echo "Expected $dimensions, got $file_dimensions"
+        echo "Frame $file has different dimensions than the other frames.\nExpected $dimensions, got $file_dimensions"
         exit 1
     fi
+}
 
+# Verify frames
+echo "Verifying frames"
+declare -a pids=()
+
+for index in "${!_arg_frames[@]}"; do
+    echo "Verifying frames $(progress_string $((index + 1)) $number_of_frames)"
+    if test $index -eq 0; then
+        verifyFrame $index
+        continue
+    fi
+
+    verifyFrame $index &
+    pids+=($!)
+
+    if (((index + 1) % N == 0 || index + 1 == number_of_frames)); then
+        for pid in "${pids[@]}"; do
+            if ! wait $pid; then
+                exit 1
+            fi
+        done
+        pids=()
+    fi
 done
 
 WORKING_DIR=$(mktemp -d)
@@ -366,11 +410,8 @@ if test $_arg_verbose -ge 1; then
     echo "Working dir is $WORKING_DIR"
 fi
 
-natural_aspect_ratio=$(echo $dimensions | sed 's/x/:/g')
-final_aspect_ratio=$(echo $dimensions | sed 's/x/:/g')
 natural_width=$(echo $dimensions | cut -d'x' -f1)
 natural_height=$(echo $dimensions | cut -d'x' -f2)
-aspect_ratio=${_final_aspect_ratio:-$natural_aspect_ratio}
 
 cut_left=$((_arg_cut_left + _arg_cut_all))
 cut_right=$((_arg_cut_right + _arg_cut_all))
@@ -384,6 +425,10 @@ cropped_offset_y=$cut_top
 
 crop_string="${cropped_width}x${cropped_height}+${cropped_offset_x}+${cropped_offset_y}"
 
+natural_aspect_ratio="${cropped_width}:${cropped_height}"
+final_aspect_ratio=$(echo $dimensions | sed 's/x/:/g')
+aspect_ratio=${_final_aspect_ratio:-$natural_aspect_ratio}
+
 # Imagemagick convert frames to png
 mkdir -p "$WORKING_DIR/processed"
 declare -a processed_frames=()
@@ -393,23 +438,37 @@ function fail {
     exit 1
 }
 
+function preprocess_file {
+    file=$1
+    converted_filename=$2
+
+    $IMAGEMAGICK_CONVERT $file -distort SRT $_arg_rotate $converted_filename.alpha.png || fail "Failed to convert $file"
+    $IMAGEMAGICK_CONVERT $converted_filename.alpha.png -crop $crop_string +repage $converted_filename.beta.png || fail "Failed to convert $file"
+    $IMAGEMAGICK_CONVERT $converted_filename.beta.png -gravity center -crop $aspect_ratio +repage $converted_filename.gamma.png || fail "Failed to convert $file"
+    sh -c "$IMAGEMAGICK_CONVERT $converted_filename.gamma.png $_arg_imagemagick_options +repage $converted_filename" || fail "Failed to convert $file"
+    rm $converted_filename.alpha.png $converted_filename.beta.png $converted_filename.gamma.png
+
+}
+
 echo "Preprocessing frames with imagemagick"
+pids=()
 for index in "${!_arg_frames[@]}"; do
     file="${_arg_frames[$index]}"
     echo "Preprocessing frames with imagemagick $(progress_string $((index + 1)) $number_of_frames)"
     file_basename=$(basename $file)
     converted_filename="$WORKING_DIR/processed/${file_basename%.*}.png"
-    $IMAGEMAGICK_CONVERT $file -distort SRT $_arg_rotate $converted_filename.alpha.png || fail "Failed to convert $file"
-    $IMAGEMAGICK_CONVERT $converted_filename.alpha.png -crop $crop_string +repage $converted_filename.beta.png || fail "Failed to convert $file"
-    $IMAGEMAGICK_CONVERT $converted_filename.beta.png -gravity center -crop $aspect_ratio +repage $converted_filename.gamma.png || fail "Failed to convert $file"
-    sh -c "$IMAGEMAGICK_CONVERT $converted_filename.gamma.png $_arg_imagemagick_options +repage $converted_filename"
-    # rm $converted_filename.alpha.png $converted_filename.beta.png $converted_filename.gamma.png
-
-    if [ $? -ne 0 ]; then
-        echo "Failed to convert $file"
-        exit 1
-    fi
+    preprocess_file $file $converted_filename &
+    pids+=($!)
     processed_frames+=("$converted_filename")
+
+    if (((index + 1) % N == 0 || index + 1 == number_of_frames)); then
+        for pid in "${pids[@]}"; do
+            if ! wait $pid; then
+                exit 1
+            fi
+        done
+        pids=()
+    fi
 done
 
 # Upscale frames using realesrgan-ncnn-vulkan
@@ -464,8 +523,15 @@ for index in "${!processed_frames[@]}"; do
 done
 
 declare -a final_frames=()
+pids=()
 
 if [ -n "$_arg_final_resolution" ]; then
+    function scale_to_final_resolution {
+        file=$1
+        final_filename=$2
+        $IMAGEMAGICK_CONVERT $file -geometry ${_arg_final_resolution}\! $final_filename || fail "Failed to scale $file"
+    }
+
     mkdir -p "$WORKING_DIR/final"
     echo "Scaling frames to final height"
     for index in "${!upscaled_frames[@]}"; do
@@ -474,9 +540,18 @@ if [ -n "$_arg_final_resolution" ]; then
         final_filename="$WORKING_DIR/final/${file_basename%.*}.png"
         echo "Scaling frames to final height $(progress_string $((index + 1)) $number_of_frames)"
 
-        $IMAGEMAGICK_CONVERT $file -geometry ${_arg_final_resolution}\! $final_filename || fail "Failed to scale $file"
-
+        scale_to_final_resolution $file $final_filename &
+        pids+=($!)
         final_frames+=("$final_filename")
+
+        if (((index + 1) % N == 0 || index + 1 == number_of_frames)); then
+            for pid in "${pids[@]}"; do
+                if ! wait $pid; then
+                    exit 1
+                fi
+            done
+            pids=()
+        fi
     done
 else
     final_frames=("${upscaled_frames[@]}")
