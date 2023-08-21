@@ -25,6 +25,7 @@
               imagemagick
               realesrgan-ncnn-vulkan
               bc
+              makeWrapper
 
               nixpkgs-fmt
               nil
@@ -38,6 +39,7 @@
               mkdir -p $out/bin
               cp taimelapse.sh $out/bin/${pname}
                 
+              wrapProgram "$out/bin/${name}" --prefix PATH : ${lib.makeBinPath [ffmpeg imagemagick realesrgan-ncnn-vulkan bc]}
               chmod a+x $out/bin/${pname}
             '';
 

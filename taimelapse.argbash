@@ -22,6 +22,7 @@ exit 11 #)Created by argbash-init v2.10.0
 # ARG_VERBOSE([v])
 # ARG_USE_PROGRAM(ffmpeg, FFMPEG)
 # ARG_USE_PROGRAM(convert, IMAGEMAGICK_CONVERT)
+# ARG_USE_PROGRAM(identify, IMAGEMAGICK_IDENTIFY)
 # ARG_USE_PROGRAM(realesrgan-ncnn-vulkan, REALESRGAN_NCNN_VULKAN)
 # ARG_USE_PROGRAM(mktemp, MKTEMP)
 # ARG_HELP([<The general help message of my script>])
@@ -58,7 +59,7 @@ for index in "${!_arg_frames[@]}"; do
         exit 1
     fi
 
-    file_dimensions=$(identify -format "%wx%h" "$file")
+    file_dimensions=$($IMAGEMAGICK_IDENTIFY -format "%wx%h" "$file")
 
     if [ $? -ne 0 ]; then
         echo "Frame $file is not a valid image"
@@ -209,7 +210,7 @@ for index in "${!final_frames[@]}"; do
 done
 
 set -x
-sh -c "ffmpeg -f concat -safe 0 -i $FRAMES_FILE -y -hide_banner -loglevel error -stats -r $_arg_framerate -vf \"settb=AVTB,setpts=N/$_arg_framerate/TB,fps=$_arg_framerate\" $_arg_ffmpeg_flags $_arg_output"
+sh -c "$FFMPEG -f concat -safe 0 -i $FRAMES_FILE -y -hide_banner -loglevel error -stats -r $_arg_framerate -vf \"settb=AVTB,setpts=N/$_arg_framerate/TB,fps=$_arg_framerate\" $_arg_ffmpeg_flags $_arg_output"
 
 # realesrgan-ncnn-vulkan -i GOPR0066.JPG -o scaled/GOPR0066-net.JPG -n realesrnet-x4plus
 
