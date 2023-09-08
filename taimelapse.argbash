@@ -20,13 +20,14 @@ exit 11 #)Created by argbash-init v2.10.0
 # ARG_OPTIONAL_SINGLE(realesrgan-flags, r, Flags that are passed to realesrgan-ncnn-vulkan)
 # ARG_OPTIONAL_SINGLE(ffmpeg-flags, f, Flags that are passed to ffmpeg. Used to define the encoding pipeline., [-c:v libx264 -crf 18 -preset veryslow -pix_fmt yuv420p])
 # ARG_POSITIONAL_INF(frames, All frames in the correct order as images, 1)
-# ARG_VERBOSE([v])
+# ARG_VERBOSE([])
 # ARG_USE_PROGRAM(ffmpeg, FFMPEG)
 # ARG_USE_PROGRAM(convert, IMAGEMAGICK_CONVERT)
 # ARG_USE_PROGRAM(identify, IMAGEMAGICK_IDENTIFY)
 # ARG_USE_PROGRAM(realesrgan-ncnn-vulkan, REALESRGAN_NCNN_VULKAN)
 # ARG_USE_PROGRAM(mktemp, MKTEMP)
-# ARG_HELP([<The general help message of my script>])
+# ARG_HELP([Create timelapse videos with AI upscaling])
+# ARG_VERSION([echo $0 v0.1.0])
 # ARGBASH_GO
 
 # [ <-- needed because of Argbash
